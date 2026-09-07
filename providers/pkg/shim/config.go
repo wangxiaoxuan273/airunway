@@ -107,8 +107,9 @@ func UpdateProviderConfigStatus(
 	return nil
 }
 
-// RetryStatusUpdate retries the supplied status update callback with a linear
-// backoff schedule: baseDelay, 2*baseDelay, ..., n*baseDelay.
+// RetryStatusUpdate retries the supplied status update callback with linear
+// backoff delays between attempts: baseDelay, 2*baseDelay, ...,
+// (attempts-1)*baseDelay.
 func RetryStatusUpdate(
 	ctx context.Context, attempts int, baseDelay time.Duration, update func(context.Context) error,
 ) error {
@@ -158,10 +159,25 @@ func StartHeartbeatLoop(ctx context.Context, interval time.Duration, tick func(c
 	logger := log.FromContext(ctx)
 
 	go func() {
+		// Exit before creating the ticker when the context is already canceled.
+		// This avoids a select race where an immediately-ready ticker could win
+		// over ctx.Done() and execute one unwanted tick.
+		if err := ctx.Err(); err != nil {
+			logger.Info("Stopping heartbeat goroutine")
+			return
+		}
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
+			// Re-check cancellation before each select for the same reason: when
+			// both ticker.C and ctx.Done() are ready, select is intentionally fair.
+			if err := ctx.Err(); err != nil {
+				logger.Info("Stopping heartbeat goroutine")
+				return
+			}
+
 			select {
 			case <-ctx.Done():
 				logger.Info("Stopping heartbeat goroutine")
